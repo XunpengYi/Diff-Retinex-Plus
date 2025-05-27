@@ -1,0 +1,112 @@
+# general settings
+name: Diff-Retinex_Plus_LSRW_Huawei_test
+model_type: DRNetModel
+num_gpu: 1  # set num_gpu: 0 for cpu mode
+manual_seed: 1234
+
+# dataset and data loader settings
+datasets:
+  val:
+    name: LOL
+    type: LoLDataset
+    gt_root: "./dataset/LSRW-huawei/test/high"
+    input_root: "./dataset/LSRW-huawei/test/low"
+    input_mode: pad
+    divide: 32
+    concat_with_hiseq: true
+    mean: [0.5, 0.5, 0.5]
+    std: [0.5, 0.5, 0.5]
+
+# network structures
+network_sr3unet:
+  type: SR3UNet
+  in_channel: 9
+  out_channel: 3
+  inner_channel: 64
+  norm_groups: 32
+  channel_mults: [1,2,4,4]
+  attn_res: [16]
+  res_blocks: 2
+  dropout: 0.1
+  divide: 16
+
+# network structures
+network_consistentunet:
+  type: DRNet_Retinex_time
+  inp_channels: 9
+  out_channels: 3
+  dim: 32
+
+network_decom:
+  type: DecomNet
+  path: ~
+
+network_ddpm:
+  type: GaussianDiffusion
+  image_size: 128
+  channels: 3
+  conditional: true
+
+ddpm_schedule:
+  schedule: "linear"
+  n_timestep: 2000
+  linear_start: !!float 1e-6
+  linear_end: !!float 1e-2
+
+# path
+path:
+  pretrain_network_ddpm: "./pretrained_weights/lsrw/net_g_ddpm_val_lsrw.pth"
+  strict_load_ddpm: true
+  resume_state: ~
+
+# training settings
+train:
+  optim_g:
+    type: Adam
+    lr: !!float 1e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [80000, 240000, 320000, 400000, 500000]
+    gamma: 0.5
+
+  total_iter: 800000
+  warmup_iter: -1  # no warm up
+
+# validation settings
+val:
+  fix_seed: true
+  ddim_eta: !!float 1.0
+  ddim_timesteps: 5
+  test_flag: true
+  use_gt_means: false
+  val_freq: !!float 5e3
+  cal_all: true
+  show_all: true
+  save_img: true
+  save_result_only: true
+
+  metrics:
+    psnr: # metric name, can be arbitrary
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+
+# logging settings
+logger:
+  print_freq: 100
+  save_checkpoint_freq: !!float 5e3
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500
