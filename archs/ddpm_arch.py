@@ -250,15 +250,11 @@ class GaussianDiffusion(nn.Module):
             pred_x0 = self.norm_minus1_1(pred_x0)
             
             if not sample_already:
-                # compute variance: "sigma_t(η)" -> see DDIM formula (16)
-                # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
                 sigmas_t = ddim_eta * torch.sqrt(
                     (1 - alpha_cumprod_t_prev) / (1 - alpha_cumprod_t) * (1 - alpha_cumprod_t / alpha_cumprod_t_prev))
-                
-                # compute "direction pointing to x_t" of DDIM formula (12)
+
                 pred_dir_xt = torch.sqrt(1 - alpha_cumprod_t_prev - sigmas_t**2) * pred_noise
-                
-                # compute x_{t-1} of DDIM formula (12)
+
                 x_prev = torch.sqrt(alpha_cumprod_t_prev) * pred_x0 + pred_dir_xt + sigmas_t * torch.randn_like(pred_x0)
 
                 sample_img = x_prev
