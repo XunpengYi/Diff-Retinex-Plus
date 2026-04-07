@@ -349,8 +349,6 @@ class DRNetModel(BaseModel):
             if self.opt['rank'] == 0:
                 if save_img:
                     # save imgs
-                    save_img_path = osp.join(self.opt['path']['visualization'], img_name,
-                                             f'{img_name}_{current_iter}.png')
                     save_img_path = osp.join(self.opt['path']['visualization'], f'{img_name}.png')
                     imwrite(sr_img, save_img_path)
 
