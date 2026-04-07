@@ -315,6 +315,199 @@ class DRNetModel(BaseModel):
 
             self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
 
+    def validation_UHD(self, dataloader, current_iter, tb_logger, save_img=False):
+        self.nondist_validation_UHD(dataloader, current_iter, tb_logger, save_img)
+
+    def nondist_validation_UHD(self, dataloader, current_iter, tb_logger, save_img, test=False):
+        test = self.opt['val'].get('test_flag', False)
+        dataset_name = dataloader.dataset.opt['name']
+        with_metrics = self.opt['val'].get('metrics') is not None
+        if with_metrics:
+            self.metric_results = {metric: 0 for metric in self.opt['val']['metrics'].keys()}
+        metric_data = dict()
+        metric_data_pytorch = dict()
+        pbar = tqdm(total=len(dataloader), unit='item')
+        if self.opt['val'].get('split_log', False):
+            self.split_results = {}
+            self.split_results['LOL'] = {metric: 0 for metric in self.opt['val']['metrics'].keys()}
+
+        for idx, val_data in enumerate(dataloader):
+            img_name = osp.splitext(osp.basename(val_data['lq_path'][0]))[0]
+            self.feed_data(val_data)
+            self.test_UHD()
+
+            visuals = self.get_current_visuals_UHD()
+            gt_img = tensor2img([visuals['gt']], min_max=(0, 1))
+            sr_img = tensor2img([visuals['diff_sr']], min_max=(0, 1))
+
+            metric_data['img'] = sr_img
+            metric_data['img2'] = gt_img
+            metric_data_pytorch['img'] = sr_img
+            metric_data_pytorch['img2'] = gt_img
+
+            path = val_data['lq_path'][0]
+            if self.opt['rank'] == 0:
+                if save_img:
+                    # save imgs
+                    save_img_path = osp.join(self.opt['path']['visualization'], img_name,
+                                             f'{img_name}_{current_iter}.png')
+                    save_img_path = osp.join(self.opt['path']['visualization'], f'{img_name}.png')
+                    imwrite(sr_img, save_img_path)
+
+            if with_metrics:
+                # calculate metrics
+                for name, opt_ in self.opt['val']['metrics'].items():
+                    if 'pytorch' in opt_['type']:
+                        self.metric_results[name] += calculate_metric(metric_data_pytorch, opt_).item()
+                    else:
+                        self.metric_results[name] += calculate_metric(metric_data, opt_)
+
+            # tentative for out of GPU memory
+            del self.lq, self.gt
+            torch.cuda.empty_cache()
+            pbar.update(1)
+            pbar.set_description(f'Test {img_name}')
+        pbar.close()
+
+        if with_metrics:
+            for metric in self.metric_results.keys():
+                self.metric_results[metric] /= (idx + 1)
+            if test is not True:
+                for metric, value in self.metric_results.items():
+                    if metric == "psnr":
+                        if value > self.best_val_psnr:
+                            self.best_val_psnr = value
+                            self.save(epoch=0, current_iter=0, name="best_val_psnr")
+
+            self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
+
+    def pad_UHD(self, img, window_size=16):
+        mod_pad_h, mod_pad_w = 0, 0
+        _, _, h, w = self.lq.size()
+        if h % window_size != 0:
+            mod_pad_h = window_size - h % window_size
+        if w % window_size != 0:
+            mod_pad_w = window_size - w % window_size
+        img = F.pad(img, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
+        return img, mod_pad_h, mod_pad_w
+
+    def pad_back_UHD(self, img, mod_pad_h, mod_pad_w):
+        _, _, h, w = img.size()
+        img = img[:, :, 0:h - mod_pad_h, 0:w - mod_pad_w]
+        return img
+
+    def test_UHD(self):
+        with torch.no_grad():
+            self.bare_ddpm_model.eval()
+            b, c, h, w = self.lq.shape
+            if h < 1000 and w < 1000:
+                self.diff_sr, _, _ = self.bare_ddpm_model.ddim_sample(self.norm_minus1_1(self.lq),
+                                                                      continous=self.opt['val'].get('ret_process',
+                                                                                                    False),
+                                                                      ddim_timesteps=self.opt['val'].get(
+                                                                          'ddim_timesteps', 25),
+                                                                      return_pred_noise=self.opt['val'].get(
+                                                                          'return_pred_noise', False),
+                                                                      return_x_recon=self.opt['val'].get('ret_x_recon',
+                                                                                                         False),
+                                                                      ddim_discr_method=self.opt['val'].get(
+                                                                          'ddim_discr_method', 'uniform'),
+                                                                      ddim_eta=self.opt['val'].get('ddim_eta', 0.0),
+                                                                      pred_type=self.opt['val'].get('pred_type',
+                                                                                                    'noise'),
+                                                                      clip_noise=self.opt['val'].get('clip_noise',
+                                                                                                     False),
+                                                                      return_all=self.opt['val'].get('ret_all', False))
+            else:
+                img_1 = self.lq[:, :, 0::2, 0::2]
+                img_2 = self.lq[:, :, 0::2, 1::2]
+                img_3 = self.lq[:, :, 1::2, 0::2]
+                img_4 = self.lq[:, :, 1::2, 1::2]
+                img_1, pad_h_1, pad_w_1 = self.pad_UHD(img_1)
+                img_2, pad_h_2, pad_w_2 = self.pad_UHD(img_2)
+                img_3, pad_h_3, pad_w_3 = self.pad_UHD(img_3)
+                img_4, pad_h_4, pad_w_4 = self.pad_UHD(img_4)
+                diff_sr_1, _, _ = self.bare_ddpm_model.ddim_sample(self.norm_minus1_1(img_1),
+                                                                   continous=self.opt['val'].get('ret_process', False),
+                                                                   ddim_timesteps=self.opt['val'].get('ddim_timesteps',
+                                                                                                      25),
+                                                                   return_pred_noise=self.opt['val'].get(
+                                                                       'return_pred_noise', False),
+                                                                   return_x_recon=self.opt['val'].get('ret_x_recon',
+                                                                                                      False),
+                                                                   ddim_discr_method=self.opt['val'].get(
+                                                                       'ddim_discr_method', 'uniform'),
+                                                                   ddim_eta=self.opt['val'].get('ddim_eta', 0.0),
+                                                                   pred_type=self.opt['val'].get('pred_type', 'noise'),
+                                                                   clip_noise=self.opt['val'].get('clip_noise', False),
+                                                                   return_all=self.opt['val'].get('ret_all', False))
+
+                diff_sr_2, _, _ = self.bare_ddpm_model.ddim_sample(self.norm_minus1_1(img_2),
+                                                                   continous=self.opt['val'].get('ret_process', False),
+                                                                   ddim_timesteps=self.opt['val'].get('ddim_timesteps',
+                                                                                                      25),
+                                                                   return_pred_noise=self.opt['val'].get(
+                                                                       'return_pred_noise', False),
+                                                                   return_x_recon=self.opt['val'].get('ret_x_recon',
+                                                                                                      False),
+                                                                   ddim_discr_method=self.opt['val'].get(
+                                                                       'ddim_discr_method', 'uniform'),
+                                                                   ddim_eta=self.opt['val'].get('ddim_eta', 0.0),
+                                                                   pred_type=self.opt['val'].get('pred_type', 'noise'),
+                                                                   clip_noise=self.opt['val'].get('clip_noise', False),
+                                                                   return_all=self.opt['val'].get('ret_all', False))
+
+                diff_sr_3, _, _ = self.bare_ddpm_model.ddim_sample(self.norm_minus1_1(img_3),
+                                                                   continous=self.opt['val'].get('ret_process', False),
+                                                                   ddim_timesteps=self.opt['val'].get('ddim_timesteps',
+                                                                                                      25),
+                                                                   return_pred_noise=self.opt['val'].get(
+                                                                       'return_pred_noise', False),
+                                                                   return_x_recon=self.opt['val'].get('ret_x_recon',
+                                                                                                      False),
+                                                                   ddim_discr_method=self.opt['val'].get(
+                                                                       'ddim_discr_method', 'uniform'),
+                                                                   ddim_eta=self.opt['val'].get('ddim_eta', 0.0),
+                                                                   pred_type=self.opt['val'].get('pred_type', 'noise'),
+                                                                   clip_noise=self.opt['val'].get('clip_noise', False),
+                                                                   return_all=self.opt['val'].get('ret_all', False))
+
+                diff_sr_4, _, _ = self.bare_ddpm_model.ddim_sample(self.norm_minus1_1(img_4),
+                                                                   continous=self.opt['val'].get('ret_process', False),
+                                                                   ddim_timesteps=self.opt['val'].get('ddim_timesteps',
+                                                                                                      25),
+                                                                   return_pred_noise=self.opt['val'].get(
+                                                                       'return_pred_noise', False),
+                                                                   return_x_recon=self.opt['val'].get('ret_x_recon',
+                                                                                                      False),
+                                                                   ddim_discr_method=self.opt['val'].get(
+                                                                       'ddim_discr_method', 'uniform'),
+                                                                   ddim_eta=self.opt['val'].get('ddim_eta', 0.0),
+                                                                   pred_type=self.opt['val'].get('pred_type', 'noise'),
+                                                                   clip_noise=self.opt['val'].get('clip_noise', False),
+                                                                   return_all=self.opt['val'].get('ret_all', False))
+
+                diff_sr_1 = self.pad_back_UHD(diff_sr_1, pad_h_1, pad_w_1)
+                diff_sr_2 = self.pad_back_UHD(diff_sr_2, pad_h_2, pad_w_2)
+                diff_sr_3 = self.pad_back_UHD(diff_sr_3, pad_h_3, pad_w_3)
+                diff_sr_4 = self.pad_back_UHD(diff_sr_4, pad_h_4, pad_w_4)
+
+                restored = torch.zeros_like(self.gt)
+                restored[:, :, 0::2, 0::2] = diff_sr_1
+                restored[:, :, 0::2, 1::2] = diff_sr_2
+                restored[:, :, 1::2, 0::2] = diff_sr_3
+                restored[:, :, 1::2, 1::2] = diff_sr_4
+                self.diff_sr = restored
+
+            self.diff_sr = self.norm_0_1(self.diff_sr)
+
+            self.bare_ddpm_model.train()
+            if hasattr(self, 'pad_left') and not self.opt['val'].get('ret_process', False):
+                self.diff_sr = pad_tensor_back(self.diff_sr, self.pad_left, self.pad_right, self.pad_top,
+                                               self.pad_bottom)
+                self.lq = pad_tensor_back(self.lq, self.pad_left, self.pad_right, self.pad_top, self.pad_bottom)
+                self.gt = pad_tensor_back(self.gt, self.pad_left, self.pad_right, self.pad_top, self.pad_bottom)
+
     def _log_validation_metric_values(self, current_iter, dataset_name, tb_logger):
         logger = get_root_logger()
         log_str = f'Validation {dataset_name}\n'
@@ -337,6 +530,12 @@ class DRNetModel(BaseModel):
         r_list = torch.cat(resized_r, dim=3)
         out_dict['l_list']= l_list.detach().cpu()
         out_dict['r_list']= r_list.detach().cpu()
+        return out_dict
+
+    def get_current_visuals_UHD(self):
+        out_dict = OrderedDict()
+        out_dict['gt'] = self.gt.detach().cpu()
+        out_dict['diff_sr'] = self.diff_sr.detach().cpu()
         return out_dict
     
     def save(self, epoch, current_iter, name=None):
